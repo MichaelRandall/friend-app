@@ -1340,5 +1340,755 @@ TROUBLESHOOTING:
                 --retain-resources RESOURCE_ID
 
 ================================================================================
+QUESTION 5: S3 Upload Requirements and Lambda Function Deployment
+================================================================================
+
+USER QUESTIONS:
+1. Do I need to upload stack templates to S3 before deploying?
+2. Deployment order: DynamoDB → Lambda → API Gateway?
+3. Does the Lambda stack build the CRUD functions automatically?
+
+ANSWERS:
+
+================================================================================
+S3 UPLOAD: NOT REQUIRED (for your setup)
+================================================================================
+
+You have TWO deployment options:
+
+OPTION 1: Direct Template Upload (RECOMMENDED FOR YOU)
+✅ No S3 bucket needed
+✅ AWS CLI uploads template directly from local file
+
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/dynamodb-stack.yaml \
+  --stack-name friends-app-stack
+```
+
+How it works:
+- CLI reads the local YAML file
+- Sends template content to CloudFormation API
+- CloudFormation stores it internally
+
+This is what your deploy-all.sh script does.
+
+OPTION 2: S3-Based Deployment (Only needed in specific cases)
+Upload to S3 first, then reference URL:
+
+```bash
+# Step 1: Upload template to S3
+aws s3 cp infrastructure/dynamodb-stack.yaml s3://my-bucket/templates/
+
+# Step 2: Deploy from S3 URL
+aws cloudformation create-stack \
+  --stack-name friends-app-stack \
+  --template-url https://my-bucket.s3.amazonaws.com/templates/dynamodb-stack.yaml
+```
+
+WHEN S3 IS REQUIRED:
+❌ Template file > 51,200 bytes (yours are ~10-20KB)
+❌ Using nested stacks with AWS::CloudFormation::Stack resources
+✅ Optional: Want centralized template versioning
+✅ Optional: Sharing templates across accounts/regions
+
+YOUR TEMPLATES:
+- dynamodb-stack.yaml: ~5KB ✅ No S3 needed
+- 02-lambda-stack.yaml: ~20KB ✅ No S3 needed
+- 03-api-gateway-stack.yaml: ~8KB ✅ No S3 needed
+
+CONCLUSION: Use direct deployment (Option 1). S3 not required.
+
+================================================================================
+DEPLOYMENT ORDER: CORRECT ✅
+================================================================================
+
+Deploy in dependency order (bottom to top of stack):
+
+STEP 1: DynamoDB Stack (No dependencies)
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/dynamodb-stack.yaml \
+  --stack-name friends-app-stack \
+  --parameter-overrides Environment=dev \
+  --region us-east-1
+```
+
+Creates and exports:
+- DynamoDB table
+- Output: TableName (exported as friends-app-stack-TableName)
+- Output: TableArn (exported as friends-app-stack-TableArn)
+
+STEP 2: Lambda Stack (Depends on DynamoDB exports)
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack \
+  --parameter-overrides Environment=dev DatabaseStackName=friends-app-stack \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region us-east-1
+```
+
+Imports from DynamoDB stack:
+- !ImportValue friends-app-stack-TableName
+- !ImportValue friends-app-stack-TableArn
+
+Creates and exports:
+- IAM execution role
+- 5 Lambda functions
+- Output: Lambda ARNs (exported for API Gateway)
+
+STEP 3: API Gateway Stack (Depends on Lambda exports)
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/03-api-gateway-stack.yaml \
+  --stack-name friends-api-stack \
+  --parameter-overrides Environment=dev LambdaStackName=friends-lambda-stack \
+  --region us-east-1
+```
+
+Imports from Lambda stack:
+- !ImportValue friends-lambda-stack-GetFriendsArn
+- !ImportValue friends-lambda-stack-CreateFriendArn
+- etc.
+
+Creates:
+- HTTP API
+- Routes
+- Integrations
+- Lambda permissions
+
+DEPENDENCY CHAIN:
+```
+DynamoDB (exports: TableName, TableArn)
+   ↓ imported by
+Lambda (exports: 5 Lambda ARNs)
+   ↓ imported by
+API Gateway (exports: API endpoint URL)
+```
+
+If you try to deploy out of order:
+❌ Lambda before DynamoDB → ERROR: Export not found
+❌ API before Lambda → ERROR: Lambda ARN not found
+
+Deletion must be REVERSE order:
+API Gateway → Lambda → DynamoDB
+
+================================================================================
+LAMBDA FUNCTIONS: BUILT AUTOMATICALLY ✅
+================================================================================
+
+The Lambda stack creates ALL 5 CRUD functions in ONE deployment.
+
+What happens when you deploy 02-lambda-stack.yaml:
+
+CLOUDFORMATION AUTOMATICALLY:
+1. ✅ Creates IAM execution role (friends-lambda-role-dev)
+2. ✅ Creates 5 Lambda functions with embedded code:
+   - friends-get-all-dev (GET /friends - scan all)
+   - friends-get-one-dev (GET /friends/{id} - get single)
+   - friends-create-dev (POST /friends - create new)
+   - friends-update-dev (PUT /friends/{id} - update existing)
+   - friends-delete-dev (DELETE /friends/{id} - remove)
+3. ✅ Sets environment variables (TABLE_NAME from DynamoDB stack)
+4. ✅ Attaches IAM role to each function
+5. ✅ Creates CloudWatch log groups (7-day retention)
+6. ✅ Exports Lambda ARNs for API Gateway integration
+
+NO SEPARATE BUILD STEP REQUIRED
+
+The function code is embedded directly in the YAML template:
+
+```yaml
+GetFriendsFunction:
+  Type: AWS::Lambda::Function
+  Properties:
+    FunctionName: !Sub 'friends-get-all-${Environment}'
+    Runtime: nodejs20.x
+    Handler: index.handler
+    Role: !GetAtt LambdaExecutionRole.Arn
+    Code:
+      ZipFile: |
+        const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+        const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+        const client = new DynamoDBClient({});
+        const docClient = DynamoDBDocumentClient.from(client);
+        const TABLE_NAME = process.env.TABLE_NAME;
+        exports.handler = async (event) => {
+          // ... entire function code here ...
+        };
+```
+
+That ZipFile section means CloudFormation will:
+1. Take the JavaScript code from the template
+2. Package it automatically (no zip command needed)
+3. Upload to Lambda service
+4. Deploy the function
+5. Make it immediately available
+
+All in ONE command: aws cloudformation deploy
+
+WHAT ABOUT THE infrastructure/lambda/ DIRECTORY?
+
+You created separate files:
+```
+infrastructure/lambda/
+  get-friends/index.js
+  get-friend/index.js
+  create-friend/index.js
+  update-friend/index.js
+  delete-friend/index.js
+```
+
+These are REFERENCE COPIES for development/editing convenience.
+
+The Lambda stack has the SAME code embedded as inline ZipFile content.
+
+You could:
+- Delete these files (code duplicated in YAML)
+- Keep them for editing, then copy changes to YAML
+- Switch to S3-based deployment if functions grow large
+
+Currently: The YAML inline code is what actually deploys.
+
+================================================================================
+ALTERNATIVE: EXTERNAL LAMBDA CODE (Production Pattern)
+================================================================================
+
+If Lambda code grows too large or you want separate source files:
+
+STEP 1: Package Lambda code
+```bash
+cd infrastructure/lambda/get-friends
+npm install  # If using external dependencies
+zip -r ../../get-friends.zip .
+cd ../..
+```
+
+STEP 2: Upload to S3
+```bash
+aws s3 cp get-friends.zip s3://my-lambda-bucket/functions/
+```
+
+STEP 3: Update Lambda stack to reference S3
+```yaml
+GetFriendsFunction:
+  Type: AWS::Lambda::Function
+  Properties:
+    Code:
+      S3Bucket: my-lambda-bucket
+      S3Key: functions/get-friends.zip
+    # ... other properties
+```
+
+STEP 4: Deploy stack
+```bash
+aws cloudformation deploy --template-file 02-lambda-stack.yaml ...
+```
+
+WHEN TO USE EXTERNAL CODE:
+- Function code > 4KB (inline code limit for console editing)
+- Using external npm packages (not just AWS SDK)
+- Want to keep YAML clean and readable
+- CI/CD pipeline builds and uploads artifacts
+
+YOUR CURRENT SETUP:
+- Functions are < 1KB each
+- Only use AWS SDK (pre-installed in Lambda runtime)
+- Inline code is simpler for your use case
+
+================================================================================
+COMPLETE DEPLOYMENT FLOW (What Actually Happens)
+================================================================================
+
+USING deploy-all.sh (AUTOMATED):
+```bash
+./infrastructure/deploy-all.sh
+```
+
+Behind the scenes:
+1. ✅ Validates AWS CLI installed
+2. ✅ Validates jq installed (for seed data)
+3. ✅ Validates AWS credentials
+4. ✅ Shows account ID and region
+5. ✅ Prompts for confirmation
+6. ✅ Deploys DynamoDB stack
+7. ✅ Waits for table to be active
+8. ✅ Prompts to load seed data
+9. ✅ Loads 5 sample friends (if confirmed)
+10. ✅ Deploys Lambda stack (creates all 5 functions)
+11. ✅ Deploys API Gateway stack
+12. ✅ Displays API endpoint URL
+13. ✅ Shows test curl commands
+
+Total time: ~5-7 minutes
+No manual intervention needed (except prompts)
+
+USING INDIVIDUAL COMMANDS (MANUAL):
+```bash
+# Step 1: Deploy database
+aws cloudformation deploy \
+  --template-file infrastructure/dynamodb-stack.yaml \
+  --stack-name friends-app-stack \
+  --parameter-overrides Environment=dev \
+  --region us-east-1
+
+# Wait for completion (automatic with 'deploy' command)
+
+# Step 2: Deploy Lambda (builds all 5 functions automatically)
+aws cloudformation deploy \
+  --template-file infrastructure/02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack \
+  --parameter-overrides \
+    Environment=dev \
+    DatabaseStackName=friends-app-stack \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region us-east-1
+
+# Lambda functions are now live and wired to DynamoDB
+
+# Step 3: Deploy API Gateway
+aws cloudformation deploy \
+  --template-file infrastructure/03-api-gateway-stack.yaml \
+  --stack-name friends-api-stack \
+  --parameter-overrides \
+    Environment=dev \
+    LambdaStackName=friends-lambda-stack \
+  --region us-east-1
+
+# Done! API is live and connected to Lambda functions
+```
+
+NO BUILD STEPS. NO S3 UPLOADS. NO PACKAGING.
+Just three CloudFormation commands.
+
+================================================================================
+VERIFICATION AFTER DEPLOYMENT
+================================================================================
+
+Check Stack Status:
+```bash
+aws cloudformation list-stacks \
+  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+  --query "StackSummaries[?contains(StackName,'friends')].{Name:StackName,Status:StackStatus}" \
+  --output table
+```
+
+Get API Endpoint:
+```bash
+API_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name friends-api-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+  --output text)
+
+echo $API_ENDPOINT
+```
+
+Test API:
+```bash
+# Get all friends
+curl $API_ENDPOINT/friends
+
+# Pretty print with jq
+curl -s $API_ENDPOINT/friends | jq '.'
+```
+
+Check Lambda Functions:
+```bash
+aws lambda list-functions \
+  --query "Functions[?contains(FunctionName,'friends')].{Name:FunctionName,Runtime:Runtime,Modified:LastModified}" \
+  --output table
+```
+
+View Lambda Logs:
+```bash
+aws logs tail /aws/lambda/friends-get-all-dev --follow
+```
+
+Test Lambda Directly (Bypass API Gateway):
+```bash
+aws lambda invoke \
+  --function-name friends-get-all-dev \
+  --payload '{}' \
+  response.json
+
+cat response.json | jq '.'
+```
+
+================================================================================
+QUESTION 6: Understanding CAPABILITY_NAMED_IAM
+================================================================================
+
+USER QUESTION:
+What does CAPABILITY_NAMED_IAM mean?
+
+ANSWER:
+
+CAPABILITY_NAMED_IAM is a SAFETY ACKNOWLEDGMENT required when your
+CloudFormation template creates IAM resources with custom/specific names.
+
+================================================================================
+WHAT IT MEANS
+================================================================================
+
+When you deploy a stack that creates IAM roles, users, or policies WITH
+SPECIFIC NAMES (not auto-generated), CloudFormation requires you to explicitly
+acknowledge:
+
+"I understand this template will create IAM resources with custom names that
+could affect AWS account permissions and security."
+
+This is a security protection mechanism.
+
+================================================================================
+WHY IT'S REQUIRED
+================================================================================
+
+SECURITY PROTECTION - Prevents accidentally creating IAM resources that could:
+- Grant excessive permissions to services or users
+- Override existing IAM roles/policies with same name
+- Affect account-wide security posture
+- Create privilege escalation vulnerabilities
+
+CloudFormation forces you to consciously acknowledge: "Yes, I know this
+template creates IAM resources and I've reviewed the permissions."
+
+Without this explicit acknowledgment, deployment will fail with:
+"InsufficientCapabilitiesException: Requires capabilities: [CAPABILITY_NAMED_IAM]"
+
+================================================================================
+YOUR LAMBDA STACK EXAMPLE
+================================================================================
+
+In 02-lambda-stack.yaml:
+
+```yaml
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'friends-lambda-role-${Environment}'  # <-- Custom name!
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: DynamoDBAccess  # <-- Named policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:Query'
+                Resource: !ImportValue friends-app-stack-TableArn
+```
+
+Because you specified:
+- RoleName: friends-lambda-role-dev (custom name)
+- PolicyName: DynamoDBAccess (named policy)
+
+CloudFormation requires the CAPABILITY_NAMED_IAM flag.
+
+================================================================================
+THE THREE IAM CAPABILITIES
+================================================================================
+
+Capability              | When Required                    | Example
+------------------------|----------------------------------|---------------------------
+CAPABILITY_IAM          | Creating IAM resources with      | RoleName omitted
+                        | AUTO-GENERATED names             | AWS names it:
+                        |                                  | MyStack-Role-ABC123
+------------------------|----------------------------------|---------------------------
+CAPABILITY_NAMED_IAM    | Creating IAM resources with      | RoleName: friends-lambda-
+                        | CUSTOM/SPECIFIC names            | role-dev
+------------------------|----------------------------------|---------------------------
+CAPABILITY_AUTO_EXPAND  | Using AWS SAM transforms         | Transform:
+                        | or CloudFormation macros         | AWS::Serverless-2016-10-31
+
+================================================================================
+WITHOUT THE CAPABILITY FLAG
+================================================================================
+
+If you try to deploy Lambda stack without the flag:
+
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack
+```
+
+ERROR:
+```
+An error occurred (InsufficientCapabilitiesException) when calling the
+CreateChangeSet operation: Requires capabilities : [CAPABILITY_NAMED_IAM]
+```
+
+CloudFormation refuses to proceed. Deployment blocked.
+
+================================================================================
+WITH THE CAPABILITY FLAG (CORRECT)
+================================================================================
+
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack \
+  --capabilities CAPABILITY_NAMED_IAM  # <-- Explicit acknowledgment
+```
+
+CloudFormation proceeds to create:
+✅ IAM Role: friends-lambda-role-dev
+✅ IAM Policy: DynamoDBAccess (inline policy attached to role)
+✅ Attaches managed policy: AWSLambdaBasicExecutionRole
+✅ Associates role with Lambda functions
+
+================================================================================
+AUTO-GENERATED NAMES (Would Only Need CAPABILITY_IAM)
+================================================================================
+
+If you removed the custom RoleName:
+
+```yaml
+LambdaExecutionRole:
+  Type: AWS::IAM::Role
+  Properties:
+    # RoleName omitted - CloudFormation auto-generates
+    AssumeRolePolicyDocument:
+      # ... same as before
+```
+
+Then you'd only need:
+```bash
+--capabilities CAPABILITY_IAM
+```
+
+CloudFormation would auto-generate a name like:
+friends-lambda-stack-LambdaExecutionRole-ABC123XYZ456
+
+Pros:
+- No name collision across stacks
+- Only need CAPABILITY_IAM
+
+Cons:
+- Unpredictable role name (harder to reference externally)
+- Changes on stack recreation
+- Harder to debug in IAM console
+
+================================================================================
+WHY YOU'RE USING CAPABILITY_NAMED_IAM (Better for Production)
+================================================================================
+
+ADVANTAGES OF CUSTOM NAMES:
+✅ Predictable role names (easier to reference in docs, scripts)
+✅ Consistent across environments (dev, staging, prod)
+✅ Clearer IAM console view (no random suffixes)
+✅ Easier to set up cross-account trust policies
+✅ Simpler for compliance audits
+✅ Better for troubleshooting (recognizable names)
+
+TRADE-OFFS:
+❌ Can't create two stacks with same role name (name collision)
+❌ Must explicitly acknowledge security implications
+❌ Requires CAPABILITY_NAMED_IAM flag on every deployment
+
+For production systems, the benefits outweigh the trade-offs.
+
+================================================================================
+MULTIPLE CAPABILITIES
+================================================================================
+
+You can provide multiple capabilities if needed:
+
+```bash
+aws cloudformation deploy \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
+```
+
+CloudFormation will accept any combination that applies to your template.
+
+================================================================================
+IN YOUR DEPLOYMENT SCRIPTS
+================================================================================
+
+deploy-all.sh includes the capability automatically:
+
+```bash
+aws cloudformation deploy \
+  --template-file "${template}" \
+  --stack-name "${stack_name}" \
+  --parameter-overrides ${params} \
+  --region "${REGION}" \
+  --capabilities CAPABILITY_NAMED_IAM \  # <-- Always included
+  --no-fail-on-empty-changeset
+```
+
+This ensures Lambda stack deployments always succeed.
+
+================================================================================
+WHY ONLY LAMBDA STACK NEEDS IT
+================================================================================
+
+Stack              | Creates IAM Resources? | Capability Needed?
+-------------------|------------------------|-------------------
+DynamoDB           | No                     | None
+Lambda             | Yes (IAM role)         | CAPABILITY_NAMED_IAM
+API Gateway        | No*                    | None
+
+*API Gateway creates Lambda permissions (AWS::Lambda::Permission), but these
+are NOT IAM resources. They use a different permission model, so no capability
+flag needed.
+
+================================================================================
+VISUAL BREAKDOWN: WHAT REQUIRES WHICH CAPABILITY
+================================================================================
+
+Template Creates                          | Required Capability
+------------------------------------------|-------------------------
+DynamoDB table                            | None
+Lambda function (no IAM role)             | None
+S3 bucket                                 | None
+IAM role (auto-generated name)            | CAPABILITY_IAM
+IAM role (custom name)                    | CAPABILITY_NAMED_IAM
+IAM user (custom name)                    | CAPABILITY_NAMED_IAM
+IAM policy (custom name, standalone)      | CAPABILITY_NAMED_IAM
+IAM group (custom name)                   | CAPABILITY_NAMED_IAM
+Lambda permission for API Gateway         | None (not an IAM resource)
+SAM template (AWS::Serverless transform)  | CAPABILITY_AUTO_EXPAND
+CloudFormation macro                      | CAPABILITY_AUTO_EXPAND
+
+================================================================================
+CHECKING REQUIRED CAPABILITIES
+================================================================================
+
+CloudFormation can tell you what capabilities are needed:
+
+```bash
+aws cloudformation create-change-set \
+  --stack-name friends-lambda-stack \
+  --template-body file://infrastructure/02-lambda-stack.yaml \
+  --change-set-name test-changeset
+
+# Check required capabilities
+aws cloudformation describe-change-set \
+  --stack-name friends-lambda-stack \
+  --change-set-name test-changeset \
+  --query "Capabilities"
+```
+
+Output:
+```json
+[
+    "CAPABILITY_NAMED_IAM"
+]
+```
+
+Delete the test changeset:
+```bash
+aws cloudformation delete-change-set \
+  --stack-name friends-lambda-stack \
+  --change-set-name test-changeset
+```
+
+================================================================================
+SECURITY BEST PRACTICES
+================================================================================
+
+When using CAPABILITY_NAMED_IAM:
+
+1. REVIEW IAM POLICIES CAREFULLY
+   - Check all permissions granted
+   - Follow principle of least privilege
+   - Avoid wildcards (*) in Resource or Action unless necessary
+
+2. USE SPECIFIC RESOURCE ARNS
+   ```yaml
+   # Good
+   Resource: !ImportValue friends-app-stack-TableArn
+
+   # Bad
+   Resource: "*"
+   ```
+
+3. LIMIT ACTIONS TO MINIMUM REQUIRED
+   ```yaml
+   # Your template (good - specific actions)
+   Action:
+     - 'dynamodb:GetItem'
+     - 'dynamodb:PutItem'
+     - 'dynamodb:UpdateItem'
+     - 'dynamodb:DeleteItem'
+     - 'dynamodb:Scan'
+     - 'dynamodb:Query'
+
+   # Bad - overly permissive
+   Action: 'dynamodb:*'
+   ```
+
+4. REVIEW ASSUME ROLE POLICIES
+   ```yaml
+   # Your template (good - only Lambda can assume)
+   Principal:
+     Service: lambda.amazonaws.com
+
+   # Bad - any AWS account
+   Principal: "*"
+   ```
+
+5. USE MANAGED POLICIES WHEN APPROPRIATE
+   ```yaml
+   ManagedPolicyArns:
+     - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+   ```
+
+6. AUDIT IAM RESOURCES REGULARLY
+   ```bash
+   aws iam list-roles --query "Roles[?contains(RoleName,'friends')]"
+   ```
+
+================================================================================
+TL;DR SUMMARY
+================================================================================
+
+WHAT IS IT?
+CAPABILITY_NAMED_IAM is a required flag when deploying CloudFormation templates
+that create IAM resources (roles, users, policies) with custom/specific names.
+
+WHY NEEDED?
+Security gate to ensure you acknowledge creating IAM resources that could
+affect account permissions.
+
+WHEN TO USE?
+- Your template creates IAM role with custom RoleName
+- Your template creates IAM user with custom UserName
+- Your template creates standalone IAM policy with custom name
+
+YOUR CASE:
+Lambda stack creates 'friends-lambda-role-dev' with custom name, so you MUST
+include --capabilities CAPABILITY_NAMED_IAM when deploying.
+
+HOW TO USE:
+```bash
+aws cloudformation deploy \
+  --template-file 02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack \
+  --capabilities CAPABILITY_NAMED_IAM  # <-- This flag
+```
+
+ALTERNATIVE:
+Remove RoleName from template (auto-generate) → only need CAPABILITY_IAM
+
+But custom names are better for production (predictable, debuggable).
+
+================================================================================
 END OF CONVERSATION EXPORT
 ================================================================================
