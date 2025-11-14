@@ -1,0 +1,115 @@
+[
+  {
+    "id": { "S": "friend-001" },
+    "friendName": { "S": "Will" },
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": { "N": "101" },
+            "type": { "S": "mobile" },
+            "number": { "S": "123-456-7890" }
+          }
+        },
+        {
+          "M": {
+            "id": { "N": "102" },
+            "type": { "S": "home" },
+            "number": { "S": "098-765-4321" }
+          }
+        }
+      ]
+    },
+    "createdAt": { "N": "1699392000000" },
+    "updatedAt": { "N": "1699392000000" }
+  },
+  {
+    "id": { "S": "friend-002" },
+    "friendName": { "S": "Jane" },
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": { "N": "201" },
+            "type": { "S": "work" },
+            "number": { "S": "555-555-5555" }
+          }
+        }
+      ]
+    },
+    "createdAt": { "N": "1699478400000" },
+    "updatedAt": { "N": "1699478400000" }
+  },
+  {
+    "id": { "S": "friend-003" },
+    "friendName": { "S": "Sarah" },
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": { "N": "301" },
+            "type": { "S": "mobile" },
+            "number": { "S": "555-123-4567" }
+          }
+        },
+        {
+          "M": {
+            "id": { "N": "302" },
+            "type": { "S": "work" },
+            "number": { "S": "555-987-6543" }
+          }
+        }
+      ]
+    },
+    "createdAt": { "N": "1699564800000" },
+    "updatedAt": { "N": "1699564800000" }
+  },
+  {
+    "id": { "S": "friend-004" },
+    "friendName": { "S": "Mike" },
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": { "N": "401" },
+            "type": { "S": "home" },
+            "number": { "S": "555-111-2222" }
+          }
+        }
+      ]
+    },
+    "createdAt": { "N": "1699651200000" },
+    "updatedAt": { "N": "1699651200000" }
+  },
+  {
+    "id": { "S": "friend-005" },
+    "friendName": { "S": "Emily" },
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": { "N": "501" },
+            "type": { "S": "mobile" },
+            "number": { "S": "555-444-5555" }
+          }
+        },
+        {
+          "M": {
+            "id": { "N": "502" },
+            "type": { "S": "home" },
+            "number": { "S": "555-666-7777" }
+          }
+        },
+        {
+          "M": {
+            "id": { "N": "503" },
+            "type": { "S": "work" },
+            "number": { "S": "555-888-9999" }
+          }
+        }
+      ]
+    },
+    "createdAt": { "N": "1699737600000" },
+    "updatedAt": { "N": "1699737600000" }
+  }
+]

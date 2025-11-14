@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: A serverless backend for the Friends App using DynamoDB, Lambda, and API Gateway.
+
+Resources:
+  # 1. The DynamoDB Table
+  FriendsTable:
+    Type: AWS::Serverless::SimpleTable # A simplified SAM resource for a DynamoDB table
+    Properties:
+      TableName: FriendsAppTable
+      PrimaryKeyName: PK
+      PrimaryKeyType: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  # 2. The Lambda Function
+  FriendsApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs18.x
+      CodeUri: ./path/to/your/lambda/code # Location of your JS code (e.g., in a 'src' folder)
+      Handler: app.handler # The function entry point (e.g., app.js and the 'handler' function)
+      Policies:
+        # Grants the function permission to read/write to the DynamoDB table
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FriendsTable
+      Environment:
+        Variables:
+          FRIENDS_TABLE_NAME: !Ref FriendsTable # Pass the table name as an environment variable
+      Events:
+        # 3. The API Gateway Endpoint
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /friends
+            Method: any # Allows GET, POST, PUT, DELETE

@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDB table for Friends application with phone numbers'
+
+Parameters:
+  TableName:
+    Type: String
+    Default: 'friends-app-table'
+    Description: 'Name of the DynamoDB table'
+    AllowedPattern: '[a-zA-Z0-9_.-]+'
+    ConstraintDescription: 'Must contain only alphanumeric characters, hyphens, underscores, or periods'
+
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Environment name for resource tagging'
+
+Resources:
+  FriendsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${TableName}-${Environment}'
+      BillingMode: PAY_PER_REQUEST  # On-demand pricing, no capacity planning needed
+
+      # Primary Key: id (partition key)
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S  # String type
+        - AttributeName: friendName
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N  # Number (timestamp)
+
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH  # Partition key
+
+      # Global Secondary Index for querying by name
+      GlobalSecondaryIndexes:
+        - IndexName: FriendNameIndex
+          KeySchema:
+            - AttributeName: friendName
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL  # Include all attributes in the index
+
+        # GSI for sorting/filtering by creation date
+        - IndexName: CreatedAtIndex
+          KeySchema:
+            - AttributeName: friendName
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+      # Enable point-in-time recovery for data protection
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+      # Enable encryption at rest
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+
+      # Stream for change data capture (optional, useful for triggers/analytics)
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  TableName:
+    Description: 'Name of the DynamoDB table'
+    Value: !Ref FriendsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  TableArn:
+    Description: 'ARN of the DynamoDB table'
+    Value: !GetAtt FriendsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TableArn'
+
+  TableStreamArn:
+    Description: 'Stream ARN for DynamoDB table'
+    Value: !GetAtt FriendsTable.StreamArn
+    Export:
+      Name: !Sub '${AWS::StackName}-StreamArn'
+
+  FriendNameIndexName:
+    Description: 'Name of the GSI for querying by friend name'
+    Value: FriendNameIndex
+    Export:
+      Name: !Sub '${AWS::StackName}-FriendNameIndex'

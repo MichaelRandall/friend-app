@@ -1,0 +1,8 @@
+/* Global resets & helpers */
+* { box-sizing: border-box; }
+img, svg { max-width: 100%; height: auto; display: block; }
+button, a { -webkit-tap-highlight-color: transparent; }
+body { margin: 0; }
+@media (min-width: 760px) {
+	body { font-size: 16px; }
+}

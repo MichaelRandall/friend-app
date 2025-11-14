@@ -1,0 +1,20 @@
+<header class="app-header">
+  <div class="brand">Friends App</div>
+  <button class="menu-btn" (click)="toggleMenu()" aria-label="Toggle navigation" aria-expanded="{{ menuOpen() }}">
+    <span class="bar"></span>
+    <span class="bar"></span>
+    <span class="bar"></span>
+  </button>
+  <nav class="primary-nav" [class.open]="menuOpen()" (click)="closeMenu()">
+    <a routerLink="/friends" routerLinkActive="active" (click)="$event.stopPropagation()">Friends</a>
+    <a routerLink="/add" routerLinkActive="active" (click)="$event.stopPropagation()">Add</a>
+  </nav>
+</header>
+
+<main class="app-main">
+  <router-outlet></router-outlet>
+</main>
+
+<footer class="app-footer">
+  <small>&copy; {{ currentYear }} Friends App</small>
+</footer>

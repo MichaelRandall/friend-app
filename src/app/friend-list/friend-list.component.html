@@ -1,0 +1,17 @@
+<h2>Friends</h2>
+
+<div *ngIf="friends.length > 0">
+  <div *ngFor="let friend of friends" class="friend-card">
+    <h3>{{ friend.friendName }}</h3>
+    <ul>
+      <li *ngFor="let phone of friend.phoneNumbers">
+        {{ phone.type }}: {{ phone.number }}
+      </li>
+    </ul>
+    <button>Edit</button>
+  </div>
+</div>
+
+<div *ngIf="friends.length === 0">
+  <p>No friends found. Add some!</p>
+</div>
