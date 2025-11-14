@@ -1,0 +1,393 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda functions for Friends API with DynamoDB integration'
+
+Parameters:
+  DatabaseStackName:
+    Type: String
+    Default: 'friends-app-stack'
+    Description: 'Name of the DynamoDB stack to import table name from'
+
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Environment name for resource tagging'
+
+Resources:
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'friends-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:Query'
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: '${DatabaseStackName}-TableArn'
+                  - !Sub
+                    - '${TableArn}/index/*'
+                    - TableArn: !ImportValue
+                        Fn::Sub: '${DatabaseStackName}-TableArn'
+
+  # Lambda Layer for AWS SDK dependencies (shared across functions)
+  DependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub 'friends-dependencies-${Environment}'
+      Description: 'AWS SDK v3 for DynamoDB operations'
+      Content:
+        S3Bucket: !Ref DeploymentBucket
+        S3Key: !Sub 'layers/dependencies-${Environment}.zip'
+      CompatibleRuntimes:
+        - nodejs20.x
+
+  # S3 Bucket for Lambda deployment packages
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'friends-lambda-deployments-${AWS::AccountId}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Get All Friends
+  GetFriendsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'friends-get-all-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+          const client = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(client);
+          const TABLE_NAME = process.env.TABLE_NAME;
+          exports.handler = async (event) => {
+            console.log('Get Friends - Event:', JSON.stringify(event, null, 2));
+            try {
+              const command = new ScanCommand({ TableName: TABLE_NAME });
+              const response = await docClient.send(command);
+              return {
+                statusCode: 200,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*',
+                  'Access-Control-Allow-Headers': 'Content-Type',
+                  'Access-Control-Allow-Methods': 'GET,OPTIONS'
+                },
+                body: JSON.stringify({ friends: response.Items || [], count: response.Count || 0 })
+              };
+            } catch (error) {
+              console.error('Error:', error);
+              return {
+                statusCode: 500,
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+                body: JSON.stringify({ error: 'Failed to retrieve friends', message: error.message })
+              };
+            }
+          };
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Get Single Friend
+  GetFriendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'friends-get-one-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
+          const client = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(client);
+          const TABLE_NAME = process.env.TABLE_NAME;
+          exports.handler = async (event) => {
+            console.log('Get Friend - Event:', JSON.stringify(event, null, 2));
+            const friendId = event.pathParameters?.id;
+            if (!friendId) {
+              return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing friend ID' }) };
+            }
+            try {
+              const command = new GetCommand({ TableName: TABLE_NAME, Key: { id: friendId } });
+              const response = await docClient.send(command);
+              if (!response.Item) {
+                return { statusCode: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Friend not found' }) };
+              }
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,OPTIONS' },
+                body: JSON.stringify(response.Item)
+              };
+            } catch (error) {
+              console.error('Error:', error);
+              return { statusCode: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Failed to retrieve friend', message: error.message }) };
+            }
+          };
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Create Friend
+  CreateFriendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'friends-create-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+          const { randomUUID } = require('crypto');
+          const client = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(client);
+          const TABLE_NAME = process.env.TABLE_NAME;
+          exports.handler = async (event) => {
+            console.log('Create Friend - Event:', JSON.stringify(event, null, 2));
+            let body;
+            try { body = JSON.parse(event.body || '{}'); } catch (error) { return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Invalid JSON' }) }; }
+            const { friendName, phoneNumbers } = body;
+            if (!friendName || !phoneNumbers || !Array.isArray(phoneNumbers)) {
+              return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing required fields' }) };
+            }
+            const friend = { id: body.id || `friend-${randomUUID()}`, friendName, phoneNumbers, createdAt: Date.now(), updatedAt: Date.now() };
+            try {
+              const command = new PutCommand({ TableName: TABLE_NAME, Item: friend });
+              await docClient.send(command);
+              return { statusCode: 201, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST,OPTIONS' }, body: JSON.stringify(friend) };
+            } catch (error) {
+              console.error('Error:', error);
+              return { statusCode: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Failed to create friend', message: error.message }) };
+            }
+          };
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Update Friend
+  UpdateFriendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'friends-update-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
+          const client = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(client);
+          const TABLE_NAME = process.env.TABLE_NAME;
+          exports.handler = async (event) => {
+            console.log('Update Friend - Event:', JSON.stringify(event, null, 2));
+            const friendId = event.pathParameters?.id;
+            if (!friendId) return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing ID' }) };
+            let body;
+            try { body = JSON.parse(event.body || '{}'); } catch (e) { return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Invalid JSON' }) }; }
+            try {
+              const existing = await docClient.send(new GetCommand({ TableName: TABLE_NAME, Key: { id: friendId } }));
+              if (!existing.Item) return { statusCode: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Not found' }) };
+              const updates = [];
+              const names = {};
+              const values = {};
+              if (body.friendName) { updates.push('#friendName = :friendName'); names['#friendName'] = 'friendName'; values[':friendName'] = body.friendName; }
+              if (body.phoneNumbers) { updates.push('#phoneNumbers = :phoneNumbers'); names['#phoneNumbers'] = 'phoneNumbers'; values[':phoneNumbers'] = body.phoneNumbers; }
+              updates.push('#updatedAt = :updatedAt'); names['#updatedAt'] = 'updatedAt'; values[':updatedAt'] = Date.now();
+              if (updates.length === 1) return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'No fields' }) };
+              const result = await docClient.send(new UpdateCommand({ TableName: TABLE_NAME, Key: { id: friendId }, UpdateExpression: `SET ${updates.join(', ')}`, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ReturnValues: 'ALL_NEW' }));
+              return { statusCode: 200, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'PUT,OPTIONS' }, body: JSON.stringify(result.Attributes) };
+            } catch (error) {
+              console.error('Error:', error);
+              return { statusCode: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Failed', message: error.message }) };
+            }
+          };
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Delete Friend
+  DeleteFriendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'friends-delete-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, DeleteCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
+          const client = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(client);
+          const TABLE_NAME = process.env.TABLE_NAME;
+          exports.handler = async (event) => {
+            console.log('Delete Friend - Event:', JSON.stringify(event, null, 2));
+            const friendId = event.pathParameters?.id;
+            if (!friendId) return { statusCode: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing ID' }) };
+            try {
+              const existing = await docClient.send(new GetCommand({ TableName: TABLE_NAME, Key: { id: friendId } }));
+              if (!existing.Item) return { statusCode: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Not found' }) };
+              await docClient.send(new DeleteCommand({ TableName: TABLE_NAME, Key: { id: friendId } }));
+              return { statusCode: 200, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'DELETE,OPTIONS' }, body: JSON.stringify({ message: 'Deleted', id: friendId }) };
+            } catch (error) {
+              console.error('Error:', error);
+              return { statusCode: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Failed', message: error.message }) };
+            }
+          };
+      Tags:
+        - Key: Application
+          Value: FriendsApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Groups
+  GetFriendsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${GetFriendsFunction}'
+      RetentionInDays: 7
+
+  GetFriendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${GetFriendFunction}'
+      RetentionInDays: 7
+
+  CreateFriendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${CreateFriendFunction}'
+      RetentionInDays: 7
+
+  UpdateFriendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${UpdateFriendFunction}'
+      RetentionInDays: 7
+
+  DeleteFriendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DeleteFriendFunction}'
+      RetentionInDays: 7
+
+Outputs:
+  GetFunctionArn:
+    Description: 'ARN of Get Friends Lambda function'
+    Value: !GetAtt GetFriendsFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GetFriendsArn'
+
+  GetOneFunctionArn:
+    Description: 'ARN of Get Friend Lambda function'
+    Value: !GetAtt GetFriendFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GetFriendArn'
+
+  CreateFunctionArn:
+    Description: 'ARN of Create Friend Lambda function'
+    Value: !GetAtt CreateFriendFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CreateFriendArn'
+
+  UpdateFunctionArn:
+    Description: 'ARN of Update Friend Lambda function'
+    Value: !GetAtt UpdateFriendFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UpdateFriendArn'
+
+  DeleteFunctionArn:
+    Description: 'ARN of Delete Friend Lambda function'
+    Value: !GetAtt DeleteFriendFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DeleteFriendArn'
+
+  LambdaRoleArn:
+    Description: 'ARN of Lambda execution role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RoleArn'

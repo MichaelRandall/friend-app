@@ -1,0 +1,1344 @@
+================================================================================
+CLOUDFORMATION & AWS INFRASTRUCTURE CONVERSATION
+================================================================================
+Date: November 14, 2025
+Topic: DynamoDB, Lambda, API Gateway Architecture for Friends App
+================================================================================
+
+================================================================================
+QUESTION 1: CloudFormation Template for DynamoDB Based on Friend Interface
+================================================================================
+
+USER QUESTION:
+Based on this interface, what would a cloudformation template for a dynamodb
+look like? Can the cloud formation template specify field and database names?
+Can you provide a file with seed data to populate the database with
+cloudformation?
+
+TypeScript Interface:
+```typescript
+export interface PhoneNumber {
+  id?: number;
+  type: 'home' | 'work' | 'mobile';
+  number: string;
+}
+
+export interface Friend {
+  id?: number;
+  friendName: string;
+  phoneNumbers: PhoneNumber[];
+}
+```
+
+ANSWER:
+Yes, CloudFormation can specify table names and key attribute names, but
+DynamoDB is schema-less for non-key attributes.
+
+FILES CREATED:
+1. infrastructure/dynamodb-stack.yaml - CloudFormation template
+2. infrastructure/seed-data.json - Sample data in DynamoDB JSON format
+3. infrastructure/deploy.sh - Deployment script
+4. infrastructure/README.md - Complete documentation
+
+KEY POINTS:
+- CloudFormation CAN specify: Table name, key attributes (id, friendName)
+- CloudFormation CANNOT specify: Non-key fields (DynamoDB is schema-less)
+- Seed data: Must be loaded via AWS CLI, Lambda, or SDK (not CloudFormation)
+
+DYNAMODB SCHEMA DESIGN:
+- Primary Key: id (String) - Partition key
+- Attributes: friendName (String), phoneNumbers (List), createdAt, updatedAt
+- Global Secondary Indexes:
+  * FriendNameIndex - Query by name
+  * CreatedAtIndex - Sort by creation date
+- Billing: PAY_PER_REQUEST (on-demand, no capacity planning)
+- Features: Point-in-time recovery, KMS encryption, DynamoDB Streams
+
+DYNAMODB JSON FORMAT:
+DynamoDB uses typed JSON with attribute markers:
+- S = String
+- N = Number (stored as string)
+- L = List
+- M = Map
+- BOOL = Boolean
+
+Example Item:
+```json
+{
+  "id": { "S": "friend-001" },
+  "friendName": { "S": "Will" },
+  "phoneNumbers": {
+    "L": [
+      {
+        "M": {
+          "id": { "N": "101" },
+          "type": { "S": "mobile" },
+          "number": { "S": "123-456-7890" }
+        }
+      }
+    ]
+  }
+}
+```
+
+DEPLOYMENT:
+```bash
+# Make script executable
+chmod +x infrastructure/deploy.sh
+
+# Deploy with defaults (dev environment, us-east-1)
+./infrastructure/deploy.sh
+
+# Or specify environment/region
+ENVIRONMENT=prod AWS_REGION=us-west-2 ./infrastructure/deploy.sh
+```
+
+================================================================================
+QUESTION 2: Stack Organization - Separate vs Combined Templates
+================================================================================
+
+USER QUESTION:
+For the API Gateway + Lambda layer, should those be separate templates or
+part of the dynamodb-stack template? What is best practice? I assume that
+the lambda function is dependent on the dynamodb creation and seeding and
+that the api gateway is then dependant on the lambda functions. Is this
+correct? What is best practice?
+
+ANSWER:
+Your dependency analysis is CORRECT:
+  DynamoDB Table (created)
+      ↓
+  Lambda Functions (depend on TableName/Arn)
+      ↓
+  API Gateway (depends on Lambda ARN)
+
+Note: Lambda depends on table existence, NOT seeding (seeding is operational)
+
+================================================================================
+BEST PRACTICE: SEPARATE STACKS WITH CROSS-STACK REFERENCES
+================================================================================
+
+RECOMMENDED ARCHITECTURE:
+```
+Stack 1: dynamodb-stack.yaml (database layer)
+   ↓ exports TableName, TableArn
+Stack 2: lambda-stack.yaml (business logic layer)
+   ↓ imports DynamoDB exports, exports Lambda ARNs
+Stack 3: api-gateway-stack.yaml (API layer)
+   ↓ imports Lambda ARNs
+```
+
+ADVANTAGES OF SEPARATE STACKS:
+1. Independent Lifecycle - Update API without touching database
+2. Reusability - Multiple APIs can reference same Lambda/DynamoDB
+3. Blast Radius - Failed Lambda deployment won't risk database deletion
+4. Team Ownership - Different teams can own different layers
+5. Faster Iterations - Change API config without full stack updates
+6. Rollback Safety - Rollback API changes without affecting data
+7. Environment Flexibility - Dev API can point to shared dev database
+
+DISADVANTAGES:
+1. Slightly more complex to manage multiple stacks
+2. Need to handle cross-stack reference deletion order
+3. More CloudFormation API calls
+
+WHEN TO USE SINGLE MONOLITHIC STACK:
+- Very small projects (< 5 resources)
+- Tightly coupled resources that always deploy together
+- Proof-of-concept or learning projects
+- You want simplicity over flexibility
+
+CROSS-STACK REFERENCE PATTERN:
+
+dynamodb-stack.yaml (exports):
+```yaml
+Outputs:
+  TableName:
+    Value: !Ref FriendsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+  TableArn:
+    Value: !GetAtt FriendsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TableArn'
+```
+
+lambda-stack.yaml (imports from DynamoDB):
+```yaml
+Parameters:
+  DatabaseStackName:
+    Type: String
+    Default: friends-app-stack
+    Description: Name of the DynamoDB stack to import from
+
+Resources:
+  GetFriendsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue
+            Fn::Sub: '${DatabaseStackName}-TableName'
+```
+
+api-gateway-stack.yaml (imports from Lambda):
+```yaml
+Parameters:
+  LambdaStackName:
+    Type: String
+    Default: friends-lambda-stack
+
+Resources:
+  GetFriendsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-GetFriendsArn'
+```
+
+DEPLOYMENT ORDER:
+```bash
+# 1. Database (once, rarely changes)
+aws cloudformation deploy \
+  --stack-name friends-db-stack \
+  --template-file 01-dynamodb-stack.yaml
+
+# 2. Lambda (updates when business logic changes)
+aws cloudformation deploy \
+  --stack-name friends-lambda-stack \
+  --template-file 02-lambda-stack.yaml
+
+# 3. API Gateway (updates when API contract changes)
+aws cloudformation deploy \
+  --stack-name friends-api-stack \
+  --template-file 03-api-gateway-stack.yaml
+```
+
+RECOMMENDED FILE STRUCTURE:
+```
+infrastructure/
+├── 01-dynamodb-stack.yaml       # Data layer
+├── 02-lambda-stack.yaml         # Business logic
+├── 03-api-gateway-stack.yaml    # API layer
+├── seed-data.json
+├── lambda/
+│   ├── get-friends/
+│   │   └── index.js
+│   ├── create-friend/
+│   │   └── index.js
+│   └── update-friend/
+│       └── index.js
+└── deploy-all.sh                # Orchestration script
+```
+
+ALTERNATIVE: NESTED STACKS (MIDDLE GROUND)
+Use a master template that orchestrates child templates:
+
+```yaml
+# master-stack.yaml
+Resources:
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: s3://bucket/dynamodb-stack.yaml
+
+  LambdaStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: DatabaseStack
+    Properties:
+      TemplateURL: s3://bucket/lambda-stack.yaml
+      Parameters:
+        TableName: !GetAtt DatabaseStack.Outputs.TableName
+```
+
+When to use nested stacks:
+- Want logical separation but single deployment command
+- Need explicit dependency ordering via DependsOn
+- Sharing templates across environments
+
+Disadvantages:
+- Must upload templates to S3 first
+- All stacks still update together
+- More complex than separate stacks
+
+================================================================================
+QUESTION 3: Stack Deletion for Cost Management
+================================================================================
+
+USER QUESTION:
+When you need to take down a whole stack for financial purposes, is it easy
+in AWS to take down each stack, so if I took down the api gateway stack, then
+the lambda stack, and then the dynamodb stack, how would you do it? Would you
+have to take them down separately or like other full stacks, delete the stack
+and all resources are deleted with it?
+
+ANSWER:
+Each stack deletes as a unit—all resources in that stack are removed together.
+You delete them separately in REVERSE dependency order.
+
+================================================================================
+HOW STACK DELETION WORKS
+================================================================================
+
+When you delete a CloudFormation stack:
+```bash
+aws cloudformation delete-stack --stack-name friends-api-stack
+```
+
+CloudFormation automatically:
+1. Identifies all resources in that stack
+2. Deletes them in reverse creation order
+3. Handles dependencies within the stack
+4. Removes the stack once all resources are gone
+
+ONE COMMAND = ENTIRE STACK GONE
+(API Gateway, routes, integrations, Lambda functions, etc.)
+
+DELETION ORDER (REVERSE DEPENDENCY):
+```bash
+# 1. Delete API Gateway stack (top layer, no dependencies)
+aws cloudformation delete-stack --stack-name friends-api-stack
+
+# Wait for completion (30-60 seconds typically)
+aws cloudformation wait stack-delete-complete --stack-name friends-api-stack
+
+# 2. Delete Lambda stack (middle layer)
+aws cloudformation delete-stack --stack-name friends-lambda-stack
+aws cloudformation wait stack-delete-complete --stack-name friends-lambda-stack
+
+# 3. Delete DynamoDB stack (bottom layer - contains your data!)
+aws cloudformation delete-stack --stack-name friends-db-stack
+aws cloudformation wait stack-delete-complete --stack-name friends-db-stack
+```
+
+WHY REVERSE ORDER?
+If you try to delete DynamoDB first while Lambda still references it:
+❌ Delete will FAIL
+Error: "Export friends-db-stack-TableName cannot be deleted as it is in use"
+
+You MUST delete consumers before providers.
+
+QUICK TEARDOWN SCRIPT:
+```bash
+#!/bin/bash
+# infrastructure/teardown.sh
+
+STACKS=(
+  "friends-api-stack"      # Delete first (top of dependency chain)
+  "friends-lambda-stack"   # Delete second
+  "friends-db-stack"       # Delete last (bottom of chain)
+)
+
+for stack in "${STACKS[@]}"; do
+  echo "Deleting $stack..."
+  aws cloudformation delete-stack --stack-name "$stack"
+  aws cloudformation wait stack-delete-complete --stack-name "$stack"
+  echo "✓ $stack deleted"
+done
+
+echo "All stacks deleted!"
+```
+
+================================================================================
+SELECTIVE SHUTDOWN OPTIONS (COST SAVING)
+================================================================================
+
+OPTION 1: DELETE TOP LAYERS ONLY (KEEP DATA)
+```bash
+# Delete API + Lambda (no ongoing costs when idle)
+aws cloudformation delete-stack --stack-name friends-api-stack
+aws cloudformation delete-stack --stack-name friends-lambda-stack
+
+# Keep DynamoDB with data (minimal storage cost ~$0.25/GB/month)
+# DynamoDB on-demand only charges for actual reads/writes
+```
+
+Costs when API/Lambda deleted but DynamoDB kept:
+- DynamoDB storage: ~$0.25/GB/month
+- Point-in-time recovery: ~$0.20/GB/month
+- No compute costs (Lambda gone, no requests hitting DynamoDB)
+
+OPTION 2: BACKUP DATA, DELETE EVERYTHING
+```bash
+# 1. Backup DynamoDB to S3
+aws dynamodb create-backup \
+  --table-name friends-app-table-dev \
+  --backup-name friends-backup-$(date +%Y%m%d)
+
+# Or export to S3 (better for large tables)
+aws dynamodb export-table-to-point-in-time \
+  --table-arn arn:aws:dynamodb:region:account:table/friends-app-table-dev \
+  --s3-bucket my-backup-bucket
+
+# 2. Delete all stacks
+./teardown.sh
+
+# 3. Later: Restore from backup
+aws dynamodb restore-table-from-backup \
+  --target-table-name friends-app-table-dev \
+  --backup-arn <backup-arn>
+```
+
+COST COMPARISON:
+
+Scenario                                    | Monthly Cost (approx)
+--------------------------------------------|----------------------
+All 3 stacks running, no traffic            | ~$0.50 (storage only)
+All 3 stacks running, moderate traffic      | ~$5-20 (requests + data)
+API + Lambda deleted, DynamoDB kept         | ~$0.25-0.50 (storage)
+All stacks deleted                          | $0
+
+KEY INSIGHT: Lambda and API Gateway are pay-per-request with ZERO cost when
+idle! DynamoDB on-demand is similar but has small storage costs.
+
+================================================================================
+PROTECTION: PREVENT ACCIDENTAL DELETION
+================================================================================
+
+Add to your stacks:
+```yaml
+# In dynamodb-stack.yaml (to protect data)
+Resources:
+  FriendsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain        # Keep table even if stack deleted
+    UpdateReplacePolicy: Retain   # Keep table on replacement updates
+    Properties:
+      # ... existing config
+```
+
+With DeletionPolicy: Retain:
+- Delete stack → DynamoDB table SURVIVES as orphaned resource
+- Must manually delete table later via console/CLI
+- Good for production data protection
+
+================================================================================
+DELETION TIMING & TROUBLESHOOTING
+================================================================================
+
+TYPICAL DELETION TIMES:
+- API Gateway: 30-60 seconds
+- Lambda: 1-2 minutes
+- DynamoDB: 2-5 minutes (longer if large table)
+
+WHAT IF DELETION FAILS?
+```bash
+# Check what failed
+aws cloudformation describe-stack-events \
+  --stack-name friends-api-stack \
+  --max-items 20
+
+# Force delete (dangerous, can orphan resources)
+aws cloudformation delete-stack \
+  --stack-name friends-api-stack \
+  --retain-resources ResourceLogicalId
+```
+
+================================================================================
+QUICK REFERENCE ANSWERS
+================================================================================
+
+Q: Do I delete them separately?
+A: ✅ Yes - one delete-stack command per stack
+
+Q: Does each stack delete all its resources?
+A: ✅ Yes - CloudFormation removes everything in that stack atomically
+
+Q: What order?
+A: ✅ Reverse dependency order: API → Lambda → DynamoDB
+
+Q: Can I delete just the expensive parts?
+A: ✅ Yes - but Lambda/API Gateway are cheap when idle; DynamoDB has storage cost
+
+Q: How long does deletion take?
+A: 30 seconds to 5 minutes depending on the stack
+
+================================================================================
+COMMON DYNAMODB OPERATIONS (FROM README)
+================================================================================
+
+ADD A NEW FRIEND:
+```bash
+aws dynamodb put-item \
+  --table-name $TABLE_NAME \
+  --item '{
+    "id": {"S": "friend-006"},
+    "friendName": {"S": "John"},
+    "phoneNumbers": {
+      "L": [
+        {
+          "M": {
+            "id": {"N": "601"},
+            "type": {"S": "mobile"},
+            "number": {"S": "555-000-1111"}
+          }
+        }
+      ]
+    },
+    "createdAt": {"N": "'$(date +%s)000'"},
+    "updatedAt": {"N": "'$(date +%s)000'"}
+  }'
+```
+
+GET A FRIEND BY ID:
+```bash
+aws dynamodb get-item \
+  --table-name $TABLE_NAME \
+  --key '{"id": {"S": "friend-001"}}'
+```
+
+UPDATE A FRIEND:
+```bash
+aws dynamodb update-item \
+  --table-name $TABLE_NAME \
+  --key '{"id": {"S": "friend-001"}}' \
+  --update-expression "SET friendName = :name, updatedAt = :timestamp" \
+  --expression-attribute-values '{
+    ":name": {"S": "William"},
+    ":timestamp": {"N": "'$(date +%s)000'"}
+  }'
+```
+
+DELETE A FRIEND:
+```bash
+aws dynamodb delete-item \
+  --table-name $TABLE_NAME \
+  --key '{"id": {"S": "friend-001"}}'
+```
+
+QUERY BY NAME (USING GSI):
+```bash
+aws dynamodb query \
+  --table-name $TABLE_NAME \
+  --index-name FriendNameIndex \
+  --key-condition-expression "friendName = :name" \
+  --expression-attribute-values '{":name": {"S": "Jane"}}'
+```
+
+SCAN ALL ITEMS:
+```bash
+aws dynamodb scan --table-name $TABLE_NAME
+```
+
+COUNT ITEMS:
+```bash
+aws dynamodb scan \
+  --table-name $TABLE_NAME \
+  --select "COUNT"
+```
+
+================================================================================
+INTEGRATION WITH ANGULAR APP
+================================================================================
+
+To connect your Angular app to DynamoDB, you'll need:
+
+1. AWS SDK for JavaScript v3:
+```bash
+npm install @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
+```
+
+2. Update Friend Service to use DynamoDB:
+```typescript
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, PutCommand }
+  from '@aws-sdk/lib-dynamodb';
+
+const client = new DynamoDBClient({ region: 'us-east-1' });
+const docClient = DynamoDBDocumentClient.from(client);
+
+async getFriends() {
+  const command = new ScanCommand({
+    TableName: 'friends-app-table-dev'
+  });
+  const response = await docClient.send(command);
+  return response.Items;
+}
+```
+
+3. Authentication: Use AWS Cognito or IAM credentials
+4. API Gateway: Consider creating a REST API in front of DynamoDB for security
+
+================================================================================
+KEY TAKEAWAYS
+================================================================================
+
+1. STACK ORGANIZATION:
+   - Use separate stacks for different layers (DB, Lambda, API)
+   - Cross-stack references via Exports/Imports
+   - Deploy in dependency order: DB → Lambda → API
+   - Delete in reverse order: API → Lambda → DB
+
+2. COST MANAGEMENT:
+   - Lambda & API Gateway: $0 when idle (pay per request)
+   - DynamoDB: Small storage cost even when idle
+   - Delete top layers (API/Lambda) to save money but keep data
+   - Full deletion: 3 commands, <10 minutes total
+
+3. CLOUDFORMATION CAPABILITIES:
+   - Can specify: Table names, key attributes, indexes
+   - Cannot specify: Non-key attributes (schema-less)
+   - Cannot bulk-load: Use AWS CLI/SDK for seed data
+
+4. BEST PRACTICES:
+   - Separate stacks for production flexibility
+   - Add DeletionPolicy: Retain for data protection
+   - Use cross-stack references for loose coupling
+   - Back up data before full teardown
+
+5. DEPLOYMENT:
+   - One command per stack
+   - Each stack is atomic (all resources or none)
+   - Use wait commands to ensure completion
+   - Monitor stack events for troubleshooting
+
+================================================================================
+ADDITIONAL RESOURCES
+================================================================================
+
+- AWS DynamoDB Developer Guide:
+  https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/
+
+- CloudFormation DynamoDB Reference:
+  https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-dynamodb-table.html
+
+- DynamoDB Best Practices:
+  https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/best-practices.html
+
+- AWS SDK for JavaScript v3:
+  https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/
+
+================================================================================
+QUESTION 4: Lambda and API Gateway Stack Implementation
+================================================================================
+
+USER REQUEST:
+Please create the lambda and api stacks and the teardown.sh file
+
+FILES CREATED:
+
+1. Lambda Function Code (infrastructure/lambda/)
+   - get-friends/index.js - Scan all friends
+   - get-friend/index.js - Get single friend by ID
+   - create-friend/index.js - Create new friend with UUID
+   - update-friend/index.js - Update friend details
+   - delete-friend/index.js - Delete friend by ID
+
+2. infrastructure/02-lambda-stack.yaml
+   - IAM execution role with DynamoDB permissions
+   - 5 Lambda functions (Node.js 20.x runtime)
+   - Cross-stack import of DynamoDB table name/ARN
+   - CloudWatch log groups (7-day retention)
+   - S3 bucket for deployment packages
+   - Exports Lambda ARNs for API Gateway integration
+
+3. infrastructure/03-api-gateway-stack.yaml
+   - HTTP API (API Gateway v2 - simpler & cheaper than REST API)
+   - CORS configuration (allows all origins for development)
+   - 5 routes mapped to Lambda functions:
+     * GET /friends - List all friends
+     * GET /friends/{id} - Get single friend
+     * POST /friends - Create friend
+     * PUT /friends/{id} - Update friend
+     * DELETE /friends/{id} - Delete friend
+   - Lambda permissions for API Gateway invocation
+   - CloudWatch logs for API monitoring
+   - Exports API endpoint URL
+
+4. infrastructure/teardown.sh
+   - Validates AWS credentials
+   - Checks which stacks exist
+   - Offers DynamoDB backup before deletion
+   - Requires explicit "yes" confirmation
+   - Deletes in reverse order: API → Lambda → DB
+   - Shows deletion progress and handles errors
+   - Summary report with troubleshooting tips
+
+5. infrastructure/deploy-all.sh
+   - Orchestrates full 3-stack deployment
+   - Validates AWS CLI, jq, credentials
+   - Deploys in dependency order
+   - Prompts to load seed data
+   - Displays API endpoint and test curl commands
+   - Shows all stack outputs
+
+================================================================================
+LAMBDA FUNCTION FEATURES
+================================================================================
+
+All Lambda functions include:
+- AWS SDK v3 for DynamoDB (latest client libraries)
+- Proper error handling with try/catch
+- Input validation (required fields, JSON parsing)
+- HTTP status codes (200, 201, 400, 404, 500)
+- CORS headers for cross-origin requests
+- CloudWatch logging for debugging
+- Environment variable for table name (cross-stack reference)
+
+Example: Create Friend Function Logic
+1. Parse and validate JSON body
+2. Check for required fields (friendName, phoneNumbers array)
+3. Generate UUID if id not provided
+4. Add createdAt and updatedAt timestamps
+5. Put item into DynamoDB
+6. Return 201 Created with friend object
+7. Handle errors with descriptive messages
+
+================================================================================
+API GATEWAY ARCHITECTURE
+================================================================================
+
+HTTP API vs REST API:
+- Chose HTTP API (API Gateway v2) over REST API
+- 70% cheaper ($1/million vs $3.50/million requests)
+- Built-in CORS support (no OPTIONS methods needed)
+- Simpler configuration
+- Automatic deployment on changes
+- Native Lambda proxy integration
+
+Route Structure:
+  GET    /friends        → GetFriendsFunction    (list all)
+  GET    /friends/{id}   → GetFriendFunction     (get one)
+  POST   /friends        → CreateFriendFunction  (create)
+  PUT    /friends/{id}   → UpdateFriendFunction  (update)
+  DELETE /friends/{id}   → DeleteFriendFunction  (delete)
+
+CORS Configuration:
+- AllowOrigins: * (all origins - restrict in production)
+- AllowMethods: GET, POST, PUT, DELETE, OPTIONS
+- AllowHeaders: Content-Type, Authorization
+- MaxAge: 300 seconds (5 minutes)
+
+================================================================================
+DEPLOYMENT WORKFLOWS
+================================================================================
+
+OPTION 1: Automated Script (Recommended)
+```bash
+# Deploy all three stacks with prompts
+./infrastructure/deploy-all.sh
+
+# With custom environment
+ENVIRONMENT=prod AWS_REGION=us-west-2 ./infrastructure/deploy-all.sh
+```
+
+OPTION 2: Individual Stack Deployment
+```bash
+# 1. DynamoDB
+aws cloudformation deploy \
+  --template-file infrastructure/dynamodb-stack.yaml \
+  --stack-name friends-app-stack \
+  --parameter-overrides Environment=dev \
+  --region us-east-1
+
+# 2. Lambda
+aws cloudformation deploy \
+  --template-file infrastructure/02-lambda-stack.yaml \
+  --stack-name friends-lambda-stack \
+  --parameter-overrides Environment=dev DatabaseStackName=friends-app-stack \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region us-east-1
+
+# 3. API Gateway
+aws cloudformation deploy \
+  --template-file infrastructure/03-api-gateway-stack.yaml \
+  --stack-name friends-api-stack \
+  --parameter-overrides Environment=dev LambdaStackName=friends-lambda-stack \
+  --region us-east-1
+```
+
+OPTION 3: Create Stack (First Time)
+```bash
+# DynamoDB
+aws cloudformation create-stack \
+  --stack-name friends-app-stack \
+  --template-body file://infrastructure/dynamodb-stack.yaml \
+  --parameters ParameterKey=Environment,ParameterValue=dev
+
+aws cloudformation wait stack-create-complete \
+  --stack-name friends-app-stack
+
+# Lambda
+aws cloudformation create-stack \
+  --stack-name friends-lambda-stack \
+  --template-body file://infrastructure/02-lambda-stack.yaml \
+  --parameters \
+    ParameterKey=Environment,ParameterValue=dev \
+    ParameterKey=DatabaseStackName,ParameterValue=friends-app-stack \
+  --capabilities CAPABILITY_NAMED_IAM
+
+aws cloudformation wait stack-create-complete \
+  --stack-name friends-lambda-stack
+
+# API Gateway
+aws cloudformation create-stack \
+  --stack-name friends-api-stack \
+  --template-body file://infrastructure/03-api-gateway-stack.yaml \
+  --parameters \
+    ParameterKey=Environment,ParameterValue=dev \
+    ParameterKey=LambdaStackName,ParameterValue=friends-lambda-stack
+
+aws cloudformation wait stack-create-complete \
+  --stack-name friends-api-stack
+```
+
+================================================================================
+SEED DATA LOADING
+================================================================================
+
+Manual Load via AWS CLI:
+```bash
+# Get table name from stack output
+TABLE_NAME=$(aws cloudformation describe-stacks \
+  --stack-name friends-app-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='TableName'].OutputValue" \
+  --output text)
+
+# Load all items from seed-data.json
+jq -c '.[]' infrastructure/seed-data.json | while read item; do
+  aws dynamodb put-item \
+    --table-name $TABLE_NAME \
+    --item "$item" \
+    --region us-east-1
+done
+
+# Verify item count
+aws dynamodb scan \
+  --table-name $TABLE_NAME \
+  --select "COUNT" \
+  --query "Count"
+```
+
+Seed Data Format (DynamoDB JSON):
+```json
+{
+  "id": { "S": "friend-001" },
+  "friendName": { "S": "Will" },
+  "phoneNumbers": {
+    "L": [
+      {
+        "M": {
+          "id": { "N": "101" },
+          "type": { "S": "mobile" },
+          "number": { "S": "123-456-7890" }
+        }
+      }
+    ]
+  },
+  "createdAt": { "N": "1699392000000" },
+  "updatedAt": { "N": "1699392000000" }
+}
+```
+
+================================================================================
+TESTING THE API
+================================================================================
+
+Get API Endpoint:
+```bash
+API_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name friends-api-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+  --output text)
+
+echo $API_ENDPOINT
+# Output: https://abc123xyz.execute-api.us-east-1.amazonaws.com/api
+```
+
+Test All Endpoints:
+
+1. GET All Friends
+```bash
+curl $API_ENDPOINT/friends
+# Expected: {"friends":[...],"count":5}
+```
+
+2. GET Single Friend
+```bash
+curl $API_ENDPOINT/friends/friend-001
+# Expected: {"id":"friend-001","friendName":"Will",...}
+```
+
+3. POST Create Friend
+```bash
+curl -X POST $API_ENDPOINT/friends \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "friendName": "Alice",
+    "phoneNumbers": [
+      {
+        "id": 601,
+        "type": "mobile",
+        "number": "555-9999"
+      }
+    ]
+  }'
+# Expected: 201 Created with full friend object including auto-generated id
+```
+
+4. PUT Update Friend
+```bash
+curl -X PUT $API_ENDPOINT/friends/friend-001 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "friendName": "William",
+    "phoneNumbers": [
+      {
+        "id": 101,
+        "type": "work",
+        "number": "555-0000"
+      }
+    ]
+  }'
+# Expected: 200 OK with updated friend object
+```
+
+5. DELETE Friend
+```bash
+curl -X DELETE $API_ENDPOINT/friends/friend-001
+# Expected: 200 OK with {"message":"Friend deleted successfully","id":"friend-001"}
+```
+
+Pretty Print JSON:
+```bash
+curl -s $API_ENDPOINT/friends | jq '.'
+```
+
+================================================================================
+TEARDOWN WORKFLOWS
+================================================================================
+
+OPTION 1: Automated Script with Safety
+```bash
+# Interactive teardown with backup prompts
+./infrastructure/teardown.sh
+
+# Will prompt:
+# - Create backup before deletion? (y/N)
+# - Are you absolutely sure? (yes/NO)
+# - Shows which stacks will be deleted
+# - Deletes in reverse order with progress
+```
+
+OPTION 2: Manual Deletion (Reverse Order)
+```bash
+# 1. API Gateway (no dependencies)
+aws cloudformation delete-stack --stack-name friends-api-stack
+aws cloudformation wait stack-delete-complete --stack-name friends-api-stack
+
+# 2. Lambda (depends on DynamoDB exports)
+aws cloudformation delete-stack --stack-name friends-lambda-stack
+aws cloudformation wait stack-delete-complete --stack-name friends-lambda-stack
+
+# 3. DynamoDB (bottom of chain - CONTAINS DATA!)
+aws cloudformation delete-stack --stack-name friends-app-stack
+aws cloudformation wait stack-delete-complete --stack-name friends-app-stack
+```
+
+OPTION 3: Backup Before Delete
+```bash
+# Create on-demand backup
+aws dynamodb create-backup \
+  --table-name friends-app-table-dev \
+  --backup-name friends-backup-$(date +%Y%m%d-%H%M%S)
+
+# Export to S3 (better for large tables)
+aws dynamodb export-table-to-point-in-time \
+  --table-arn arn:aws:dynamodb:us-east-1:ACCOUNT:table/friends-app-table-dev \
+  --s3-bucket my-backup-bucket \
+  --s3-prefix friends-backup/ \
+  --export-format DYNAMODB_JSON
+```
+
+OPTION 4: Selective Deletion (Keep Data)
+```bash
+# Delete only API Gateway and Lambda (keep DynamoDB)
+aws cloudformation delete-stack --stack-name friends-api-stack
+aws cloudformation delete-stack --stack-name friends-lambda-stack
+
+# Result: No compute costs, only DynamoDB storage (~$0.25/GB/month)
+```
+
+================================================================================
+MONITORING & DEBUGGING
+================================================================================
+
+View Stack Status:
+```bash
+# List all friends stacks
+aws cloudformation list-stacks \
+  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+  --query "StackSummaries[?contains(StackName,'friends')].{Name:StackName,Status:StackStatus}" \
+  --output table
+
+# Describe specific stack
+aws cloudformation describe-stacks --stack-name friends-app-stack
+
+# Check stack events (troubleshooting)
+aws cloudformation describe-stack-events \
+  --stack-name friends-lambda-stack \
+  --max-items 20
+```
+
+CloudWatch Logs:
+```bash
+# List log groups
+aws logs describe-log-groups \
+  --log-group-name-prefix /aws/lambda/friends
+
+# Tail Lambda logs (requires awslogs or similar)
+aws logs tail /aws/lambda/friends-get-all-dev --follow
+
+# Get recent log events
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/friends-get-all-dev \
+  --start-time $(date -u -d '5 minutes ago' +%s)000
+```
+
+Test Lambda Directly:
+```bash
+# Invoke Lambda function (bypass API Gateway)
+aws lambda invoke \
+  --function-name friends-get-all-dev \
+  --payload '{}' \
+  response.json
+
+cat response.json | jq '.'
+```
+
+View API Gateway Logs:
+```bash
+aws logs tail /aws/apigateway/friends-api-dev --follow
+```
+
+================================================================================
+COST OPTIMIZATION
+================================================================================
+
+Current Architecture Costs (Approximate):
+
+Component          | Idle Cost/Month | Active Cost (10k req/month)
+-------------------|-----------------|-----------------------------
+DynamoDB           | $0.25-0.50      | $1-2 (storage + requests)
+Lambda (5 funcs)   | $0.00           | $0.10 (compute time)
+API Gateway HTTP   | $0.00           | $0.01 (requests)
+CloudWatch Logs    | $0.00           | $0.50 (ingestion)
+S3 (deployments)   | $0.01           | $0.01
+-------------------|-----------------|-----------------------------
+TOTAL              | ~$0.50/month    | ~$2.50/month
+
+Cost-Saving Tips:
+1. Use on-demand billing (no provisioned capacity)
+2. Set CloudWatch log retention to 7 days
+3. HTTP API costs 70% less than REST API
+4. Lambda idle time is FREE (pay per invocation only)
+5. Delete API/Lambda stacks when not in use (keep DynamoDB)
+6. Use DynamoDB backups instead of continuous backups for dev
+
+Production Cost Estimates (1 million requests/month):
+- API Gateway HTTP: $1.00
+- Lambda: $0.20 (compute) + $0.02 (requests) = $0.22
+- DynamoDB: $1.25 (writes) + $0.25 (reads) = $1.50
+- Total: ~$3/month for 1M requests
+
+================================================================================
+TROUBLESHOOTING COMMON ISSUES
+================================================================================
+
+Issue 1: Stack Creation Fails with "Export cannot be deleted as it is in use"
+Solution: Delete stacks in reverse order (API → Lambda → DB)
+
+Issue 2: Lambda function times out
+Check:
+- DynamoDB table exists and is active
+- Lambda has correct IAM permissions
+- Table name environment variable is set correctly
+- Check CloudWatch logs for errors
+
+Issue 3: API Gateway returns 403 Forbidden
+Check:
+- Lambda permission resource created (allows API Gateway to invoke)
+- Integration URI points to correct Lambda ARN
+- Stage is deployed (HTTP API auto-deploys by default)
+
+Issue 4: CORS errors in browser
+Verify:
+- API Gateway CORS configuration allows your origin
+- Lambda returns proper CORS headers in response
+- Preflight OPTIONS requests work (HTTP API handles automatically)
+
+Issue 5: Seed data won't load
+Check:
+- jq is installed (brew install jq)
+- Seed data JSON is valid (jq . seed-data.json)
+- Table name is correct
+- DynamoDB permissions in AWS credentials
+
+Issue 6: Cannot delete S3 bucket (Lambda deployment bucket)
+Solution: Empty bucket first
+```bash
+aws s3 rm s3://friends-lambda-deployments-ACCOUNT-dev --recursive
+aws cloudformation delete-stack --stack-name friends-lambda-stack
+```
+
+Issue 7: Stack stuck in DELETE_IN_PROGRESS
+Check:
+- Resources that can't be deleted (S3 bucket with objects)
+- Resources created outside CloudFormation
+- Force delete: retain problematic resources
+```bash
+aws cloudformation delete-stack \
+  --stack-name STACK \
+  --retain-resources RESOURCE_LOGICAL_ID
+```
+
+================================================================================
+SECURITY BEST PRACTICES
+================================================================================
+
+Current Implementation (Development):
+✓ CORS allows all origins (*) - GOOD for dev, RESTRICT for prod
+✓ No authentication - ADD Cognito or API keys for prod
+✓ CloudWatch logging enabled
+✓ IAM least privilege (Lambda can only access specific DynamoDB table)
+✓ Encryption at rest (DynamoDB KMS)
+✓ HTTPS only (API Gateway enforces)
+
+Production Hardening Checklist:
+[ ] Add AWS Cognito user pool for authentication
+[ ] Restrict CORS to specific origins
+[ ] Add API key or OAuth 2.0 authorization
+[ ] Enable AWS WAF for DDoS protection
+[ ] Add request throttling/rate limiting
+[ ] Enable X-Ray tracing for distributed debugging
+[ ] Add VPC endpoints if connecting from private network
+[ ] Rotate IAM credentials regularly
+[ ] Enable CloudTrail for audit logging
+[ ] Add resource tagging for cost allocation
+[ ] Implement backup retention policies
+[ ] Add alarms for error rates and latency
+
+Example: Add API Key to API Gateway
+```yaml
+# In 03-api-gateway-stack.yaml
+Resources:
+  ApiKey:
+    Type: AWS::ApiGatewayV2::ApiKey
+    Properties:
+      Name: friends-api-key
+      Enabled: true
+
+  # Require API key on routes
+  GetFriendsRoute:
+    Properties:
+      AuthorizationType: API_KEY
+```
+
+================================================================================
+INTEGRATION WITH ANGULAR APP
+================================================================================
+
+Update FriendService to call API:
+
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import { Friend } from './models/friend.interface';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class FriendService {
+  // Replace with your API endpoint from stack output
+  private apiUrl = 'https://xxxxx.execute-api.us-east-1.amazonaws.com/api/friends';
+
+  constructor(private http: HttpClient) {}
+
+  getFriends(): Observable<{ friends: Friend[], count: number }> {
+    return this.http.get<{ friends: Friend[], count: number }>(this.apiUrl);
+  }
+
+  getFriend(id: string): Observable<Friend> {
+    return this.http.get<Friend>(`${this.apiUrl}/${id}`);
+  }
+
+  createFriend(friend: Omit<Friend, 'id' | 'createdAt' | 'updatedAt'>): Observable<Friend> {
+    return this.http.post<Friend>(this.apiUrl, friend);
+  }
+
+  updateFriend(id: string, friend: Partial<Friend>): Observable<Friend> {
+    return this.http.put<Friend>(`${this.apiUrl}/${id}`, friend);
+  }
+
+  deleteFriend(id: string): Observable<{ message: string, id: string }> {
+    return this.http.delete<{ message: string, id: string }>(`${this.apiUrl}/${id}`);
+  }
+}
+```
+
+Update Component to use Observable:
+
+```typescript
+export class FriendListComponent implements OnInit {
+  friends: Friend[] = [];
+  loading = false;
+  error: string | null = null;
+
+  constructor(private friendService: FriendService) {}
+
+  ngOnInit(): void {
+    this.loadFriends();
+  }
+
+  loadFriends(): void {
+    this.loading = true;
+    this.error = null;
+
+    this.friendService.getFriends().subscribe({
+      next: (response) => {
+        this.friends = response.friends;
+        this.loading = false;
+      },
+      error: (err) => {
+        console.error('Error loading friends:', err);
+        this.error = 'Failed to load friends. Please try again.';
+        this.loading = false;
+      }
+    });
+  }
+}
+```
+
+Environment Configuration:
+
+```typescript
+// src/environments/environment.ts
+export const environment = {
+  production: false,
+  apiUrl: 'https://xxxxx.execute-api.us-east-1.amazonaws.com/api'
+};
+
+// src/environments/environment.prod.ts
+export const environment = {
+  production: true,
+  apiUrl: 'https://yyyyy.execute-api.us-east-1.amazonaws.com/api'
+};
+```
+
+Get API URL from CloudFormation:
+```bash
+aws cloudformation describe-stacks \
+  --stack-name friends-api-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+  --output text
+```
+
+================================================================================
+ADVANCED: CI/CD PIPELINE
+================================================================================
+
+GitHub Actions Example:
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy AWS Infrastructure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy DynamoDB Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/dynamodb-stack.yaml \
+            --stack-name friends-app-stack-${{ env.ENVIRONMENT }} \
+            --parameter-overrides Environment=${{ env.ENVIRONMENT }} \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy Lambda Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/02-lambda-stack.yaml \
+            --stack-name friends-lambda-stack-${{ env.ENVIRONMENT }} \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+              DatabaseStackName=friends-app-stack-${{ env.ENVIRONMENT }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy API Gateway Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/03-api-gateway-stack.yaml \
+            --stack-name friends-api-stack-${{ env.ENVIRONMENT }} \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+              LambdaStackName=friends-lambda-stack-${{ env.ENVIRONMENT }} \
+            --no-fail-on-empty-changeset
+
+      - name: Get API Endpoint
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name friends-api-stack-${{ env.ENVIRONMENT }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+          echo "API Endpoint: $API_URL"
+```
+
+================================================================================
+QUICK REFERENCE COMMANDS
+================================================================================
+
+DEPLOYMENT:
+  Full:         ./infrastructure/deploy-all.sh
+  Individual:   aws cloudformation deploy --template-file FILE --stack-name NAME
+
+TEARDOWN:
+  Full:         ./infrastructure/teardown.sh
+  Individual:   aws cloudformation delete-stack --stack-name NAME
+
+MONITORING:
+  Stacks:       aws cloudformation list-stacks
+  Events:       aws cloudformation describe-stack-events --stack-name NAME
+  Logs:         aws logs tail /aws/lambda/FUNCTION --follow
+
+TESTING:
+  Get endpoint: aws cloudformation describe-stacks --stack-name friends-api-stack \
+                --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue"
+  Test API:     curl $API_ENDPOINT/friends
+  Invoke Lambda: aws lambda invoke --function-name FUNC response.json
+
+DATA:
+  Load seed:    jq -c '.[]' seed-data.json | while read i; do \
+                  aws dynamodb put-item --table-name TABLE --item "$i"; done
+  Backup:       aws dynamodb create-backup --table-name TABLE --backup-name NAME
+  Scan:         aws dynamodb scan --table-name TABLE
+
+TROUBLESHOOTING:
+  Check logs:   aws logs filter-log-events --log-group-name /aws/lambda/FUNC
+  Stack status: aws cloudformation describe-stacks --stack-name NAME
+  Force delete: aws cloudformation delete-stack --stack-name NAME \
+                --retain-resources RESOURCE_ID
+
+================================================================================
+END OF CONVERSATION EXPORT
+================================================================================

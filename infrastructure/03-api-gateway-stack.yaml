@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'API Gateway REST API for Friends application with Lambda integrations'
+
+Parameters:
+  LambdaStackName:
+    Type: String
+    Default: 'friends-lambda-stack'
+    Description: 'Name of the Lambda stack to import function ARNs from'
+
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Environment name for resource tagging'
+
+  StageName:
+    Type: String
+    Default: 'api'
+    Description: 'API Gateway stage name (appears in URL path)'
+
+Resources:
+  # HTTP API (API Gateway v2 - simpler, cheaper, better for Lambda)
+  FriendsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'friends-api-${Environment}'
+      Description: 'REST API for Friends application'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        MaxAge: 300
+      Tags:
+        Application: FriendsApp
+        Environment: !Ref Environment
+
+  # API Stage
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref FriendsApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+      Description: !Sub '${Environment} environment stage'
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: '$context.requestId $context.error.message $context.error.messageString'
+      Tags:
+        Application: FriendsApp
+        Environment: !Ref Environment
+
+  # CloudWatch Log Group for API Gateway
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/friends-api-${Environment}'
+      RetentionInDays: 7
+
+  # Lambda Permissions for API Gateway
+  GetFriendsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        Fn::Sub: '${LambdaStackName}-GetFriendsArn'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FriendsApi}/*'
+
+  GetFriendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        Fn::Sub: '${LambdaStackName}-GetFriendArn'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FriendsApi}/*'
+
+  CreateFriendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        Fn::Sub: '${LambdaStackName}-CreateFriendArn'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FriendsApi}/*'
+
+  UpdateFriendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        Fn::Sub: '${LambdaStackName}-UpdateFriendArn'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FriendsApi}/*'
+
+  DeleteFriendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        Fn::Sub: '${LambdaStackName}-DeleteFriendArn'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FriendsApi}/*'
+
+  # Lambda Integrations
+  GetFriendsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FriendsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-GetFriendsArn'
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  GetFriendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FriendsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-GetFriendArn'
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  CreateFriendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FriendsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-CreateFriendArn'
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  UpdateFriendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FriendsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-UpdateFriendArn'
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  DeleteFriendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FriendsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue
+        Fn::Sub: '${LambdaStackName}-DeleteFriendArn'
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  # Routes
+  GetFriendsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FriendsApi
+      RouteKey: 'GET /friends'
+      Target: !Sub 'integrations/${GetFriendsIntegration}'
+
+  GetFriendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FriendsApi
+      RouteKey: 'GET /friends/{id}'
+      Target: !Sub 'integrations/${GetFriendIntegration}'
+
+  CreateFriendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FriendsApi
+      RouteKey: 'POST /friends'
+      Target: !Sub 'integrations/${CreateFriendIntegration}'
+
+  UpdateFriendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FriendsApi
+      RouteKey: 'PUT /friends/{id}'
+      Target: !Sub 'integrations/${UpdateFriendIntegration}'
+
+  DeleteFriendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FriendsApi
+      RouteKey: 'DELETE /friends/{id}'
+      Target: !Sub 'integrations/${DeleteFriendIntegration}'
+
+Outputs:
+  ApiEndpoint:
+    Description: 'API Gateway endpoint URL'
+    Value: !Sub 'https://${FriendsApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  ApiId:
+    Description: 'API Gateway ID'
+    Value: !Ref FriendsApi
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiId'
+
+  ApiStage:
+    Description: 'API Gateway stage name'
+    Value: !Ref ApiStage
+    Export:
+      Name: !Sub '${AWS::StackName}-StageName'
